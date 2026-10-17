@@ -226,3 +226,8 @@ __marimo__/
 crash.log
 *.tfplan
 terraform.tfvars
+
+# IDE and generated diagram drafts
+.idea/
+*.iml
+.archify/
