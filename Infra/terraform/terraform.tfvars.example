@@ -1,0 +1,4 @@
+project_id  = "bigquerytarun"
+region      = "europe-west2"
+bq_location = "europe-west2"
+env         = "poc"

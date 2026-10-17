@@ -1,0 +1,21 @@
+# Application users. Full snapshot each time, so the table is replaced.
+name: user
+version: 1
+description: Application users (full snapshot)
+file_pattern: '^user_(\d{8})\.(csv|xlsx)$'
+file_date_group: 1
+target_table: supplementary_data.user
+load_mode: overwrite
+file_format: [csv, xlsx]
+delimiter: ','
+has_header: true
+min_rows: 1
+unique_key: [user_id]
+columns:
+  - { name: user_id,       type: INT64,     required: true }
+  - { name: username,      type: STRING,    required: true, regex: '^[a-z0-9_.]{3,30}$' }
+  - { name: email,         type: STRING,    required: true, regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$' }
+  - { name: customer_id,   type: INT64,     required: true }
+  - { name: role,          type: STRING,    required: true, allowed_values: [admin, member, viewer] }
+  - { name: created_at,    type: TIMESTAMP, required: true }
+  - { name: last_login_at, type: TIMESTAMP }

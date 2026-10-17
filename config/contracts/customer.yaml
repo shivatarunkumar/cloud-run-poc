@@ -1,0 +1,22 @@
+# Customer master data. Daily file, appended.
+name: customer
+version: 1
+description: Customer master data
+file_pattern: '^customer_(\d{8})\.(csv|xlsx)$'
+file_date_group: 1
+target_table: supplementary_data.customer
+load_mode: append
+file_format: [csv, xlsx]
+delimiter: ','
+has_header: true
+min_rows: 1
+unique_key: [customer_id]
+columns:
+  - { name: customer_id, type: INT64,  required: true }
+  - { name: first_name,  type: STRING, required: true, max_length: 100 }
+  - { name: last_name,   type: STRING, required: true, max_length: 100 }
+  - { name: email,       type: STRING, required: true, regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$' }
+  - { name: phone,       type: STRING, regex: '^\+?[0-9\- ]{7,20}$', severity: WARNING }
+  - { name: country,     type: STRING, required: true, allowed_values: [US, UK, IN, CA, AU, DE, FR] }
+  - { name: signup_date, type: DATE,   required: true }
+  - { name: is_active,   type: BOOL,   required: true }

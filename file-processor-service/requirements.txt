@@ -1,0 +1,8 @@
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+pydantic-settings==2.6.1
+google-cloud-storage==2.18.2
+google-cloud-bigquery==3.27.0
+PyYAML==6.0.2
+openpyxl==3.1.5

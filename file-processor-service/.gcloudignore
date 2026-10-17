@@ -1,0 +1,9 @@
+# Files excluded from `gcloud run deploy --source` uploads.
+.gcloudignore
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+tests/
+requirements-dev.txt

@@ -1,0 +1,20 @@
+# Customer orders. Daily file, appended. Dates arrive as DD/MM/YYYY.
+name: orders
+version: 1
+description: Customer orders
+file_pattern: '^orders_(\d{8})\.(csv|xlsx)$'
+file_date_group: 1
+target_table: supplementary_data.orders
+load_mode: append
+file_format: [csv, xlsx]
+delimiter: ','
+has_header: true
+min_rows: 1
+unique_key: [order_id]
+columns:
+  - { name: order_id,    type: INT64,   required: true }
+  - { name: customer_id, type: INT64,   required: true }
+  - { name: order_date,  type: DATE,    required: true, format: '%d/%m/%Y' }
+  - { name: amount,      type: NUMERIC, required: true }
+  - { name: currency,    type: STRING,  required: true, allowed_values: [GBP, USD, EUR, INR] }
+  - { name: status,      type: STRING,  required: true, allowed_values: [PLACED, SHIPPED, DELIVERED, CANCELLED] }
