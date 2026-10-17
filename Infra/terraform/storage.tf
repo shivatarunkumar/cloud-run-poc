@@ -67,11 +67,6 @@ resource "google_storage_bucket" "config" {
   depends_on = [google_project_service.apis]
 }
 
-resource "google_storage_bucket_object" "contracts" {
-  for_each = fileset(var.contracts_dir, "*.yaml")
-
-  bucket       = google_storage_bucket.config.name
-  name         = "contracts/${each.value}"
-  source       = "${var.contracts_dir}/${each.value}"
-  content_type = "application/x-yaml"
-}
+# Data contracts are not managed here: DataDesk publishes one YAML per onboarded table to
+# gs://<config bucket>/contracts/ (see config/contracts/README.md). Terraform only creates
+# the bucket, so `make setup` never overwrites or deletes a contract DataDesk wrote.

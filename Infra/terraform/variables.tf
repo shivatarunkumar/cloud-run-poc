@@ -27,12 +27,6 @@ variable "service_name" {
   default     = "file-processor"
 }
 
-variable "contracts_dir" {
-  description = "Local directory holding data contract YAML files to upload to the config bucket."
-  type        = string
-  default     = "../../config/contracts"
-}
-
 variable "log_level" {
   description = "Service log level: DEBUG (also logs raw Pub/Sub envelopes), INFO, WARNING, ERROR."
   type        = string

@@ -141,3 +141,51 @@ def test_sample_failures_are_capped(tmp_path):
     rule = by_type(report, "TYPE", "id")
     assert rule.records_failed == 30
     assert len(rule.sample_failures) == 3
+
+
+# Rules DataDesk's onboarding contracts add: per-column unique, numeric range, minimum length.
+MERGED = Contract.model_validate(
+    {
+        "name": "orders",
+        "version": 3,
+        "file_pattern": r"^orders_(\d{8})\.csv$",
+        "target_table": "supplementary_data.orders",
+        "columns": [
+            {"name": "order_id", "type": "INT64", "required": True, "unique": True},
+            {"name": "amount", "type": "NUMERIC", "min": 0, "max": 1000},
+            {"name": "code", "type": "STRING", "min_length": 3, "description": "Three-letter code"},
+        ],
+    }
+)
+MERGED_HEADER = "order_id,amount,code\n"
+
+
+@pytest.mark.parametrize(
+    "rows, rule_type, column, failed_row",
+    [
+        ("1,10,ABC\n1,20,DEF\n", "UNIQUE", "order_id", 2),
+        ("1,-5,ABC\n2,20,DEF\n", "RANGE", "amount", 1),
+        ("1,10,ABC\n2,1001,DEF\n", "RANGE", "amount", 2),
+        ("1,10,AB\n2,20,DEF\n", "MIN_LENGTH", "code", 1),
+    ],
+)
+def test_merged_rules(tmp_path, rows, rule_type, column, failed_row):
+    report = validate(write(tmp_path, rows, header=MERGED_HEADER), MERGED)
+    rule = by_type(report, rule_type, column)
+    assert not rule.passed and rule.records_failed == 1
+    assert rule.sample_failures[0]["row_number"] == failed_row
+    assert rule.category == "contract"
+    assert not report.passed
+
+
+def test_merged_rules_pass(tmp_path):
+    report = validate(write(tmp_path, "1,0,ABC\n2,1000,DEFG\n3,,XYZ\n", header=MERGED_HEADER), MERGED)
+    assert report.passed
+    assert {"UNIQUE", "RANGE", "MIN_LENGTH"} <= {r.rule_type for r in report.results}
+
+
+def test_min_above_max_is_refused():
+    with pytest.raises(ValueError, match="min is greater than max"):
+        Contract.model_validate(
+            {**MERGED.model_dump(), "columns": [{"name": "a", "type": "INT64", "min": 5, "max": 1}]}
+        )

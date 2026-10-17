@@ -27,7 +27,7 @@ BQ_CLEANUP_DATASETS ?= supplementary_data file_audit
 
 .DEFAULT_GOAL := help
 .PHONY: help install tfvars setup plan destroy check-resources cloud-run-deploy check test require-project \
-        mockdata upload-mockdata bq-cleanup
+        mockdata upload-mockdata bq-cleanup contracts-handover upload-contracts
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -66,6 +66,15 @@ setup: require-project ## Create/update all GCP resources (terraform apply, asks
 
 destroy: require-project ## Delete all GCP resources created by Terraform (asks for confirmation)
 	terraform -chdir=$(TF_DIR) destroy
+
+contracts-handover: require-project ## Once: stop Terraform tracking the contract objects (they stay in the bucket)
+	@if terraform -chdir=$(TF_DIR) state list 2>/dev/null | grep -q '^google_storage_bucket_object.contracts'; then \
+		terraform -chdir=$(TF_DIR) state rm google_storage_bucket_object.contracts && \
+		echo "Done. The contracts are still in gs://$(PROJECT_ID)-$(ENV)-config/contracts/; DataDesk now owns them."; \
+	else echo "Nothing to do: Terraform doesn't track any contract objects."; fi
+
+upload-contracts: require-project ## Copy the starter contracts in config/contracts/ to the config bucket (no DataDesk)
+	gcloud storage cp config/contracts/*.yaml gs://$(PROJECT_ID)-$(ENV)-config/contracts/ --project $(PROJECT_ID)
 
 bq-cleanup: require-project ## Truncate all tables in supplementary_data and file_audit (asks to confirm)
 	@PROJECT_ID=$(PROJECT_ID) ./scripts/bq_cleanup.sh $(BQ_CLEANUP_DATASETS)

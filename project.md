@@ -32,7 +32,7 @@ flowchart LR
 | Region | **europe-west2** for every resource, BigQuery datasets included | All of your existing resources are in this region. |
 | Bad data | **All-or-nothing** | Any ERROR rule failure rejects the whole file. Partial loads never happen. WARNING rules are only recorded. |
 | Networking | **No VPC/subnet** | Cloud Run reaches GCS, BigQuery and Pub/Sub through Google APIs. Security comes from internal ingress plus authenticated push. If a private resource is ever needed, add Direct VPC egress then. |
-| Contracts | YAML in a GCS **config** bucket | Mappings and rules can change without redeploying. The source YAML lives in git (`config/contracts/`) and Terraform uploads it. The service caches contracts with a TTL. |
+| Contracts | YAML in a GCS **config** bucket, **published by DataDesk** | Mappings and rules can change without redeploying. DataDesk's onboarding contract is the source: it writes `contracts/<dataset>.<table>.yaml` whenever the contract changes (see §3). Terraform only creates the bucket. The service caches contracts with a TTL. |
 | File size | Small (< ~100 MB) | Rows are validated by streaming through Python, then loaded with a **BQ load job** from GCS. Streaming inserts are not used. |
 | Deployment | `gcloud run deploy --source` from local. **No Terraform-managed registry.** | Terraform creates the Cloud Run service with a placeholder image and ignores later image changes. Code deploys come from local. Cloud Build builds the image and gcloud creates the `cloud-run-source-deploy` Artifact Registry repo itself. |
 | Audit writes | `job_metadata` uses DML INSERT/UPDATE. `validation_metadata` uses `insert_rows_json` | Rows in the streaming buffer can't be UPDATEd. Validation rows are insert-only, so streaming is fine for them. |
@@ -46,7 +46,7 @@ flowchart LR
 | # | Step | Outcome |
 |---|---|---|
 | 1 | Parse the envelope. Ignore events other than `OBJECT_FINALIZE` and folder placeholders (`name` ending with `/`). | 204, ack |
-| 2 | **Resolve the contract** by matching the filename against each contract's `file_pattern`. The regex group gives `file_date`. | No match → move the file to `invalid/_unmapped/...`, job `REJECTED`, ack |
+| 2 | **Resolve the contract.** A file under a table folder (`…/<dataset>.<table>/…`, which is how DataDesk lands files) reads only `contracts/<dataset>.<table>.yaml`, on demand, cached per table. A file without one is matched by name against every contract's `file_pattern`. The pattern's date group gives `file_date`. | No contract → move the file to `invalid/_unmapped/...`, job `REJECTED`, ack |
 | 3 | **Idempotency check.** Key = `bucket/name#generation` (guards against Pub/Sub redelivering the same message). If a job with this key already has status `SUCCESS` or `IN_PROGRESS`, skip and ack. Otherwise `attempt_number` = prior attempts + 1. A new upload of the same file gets a new generation and is processed normally. `load_mode: append` adds the rows again; `overwrite` replaces the table. | `DUPLICATE_SKIPPED`, ack |
 | 4 | **Register the job** in `job_metadata` (DML INSERT, status `IN_PROGRESS`). | |
 | 5 | **Convert `.xlsx`** to CSV in the staging bucket (first sheet, using openpyxl). | |
@@ -74,7 +74,13 @@ flowchart LR
 
 ---
 
-## 3. Data contract format (`config/contracts/<name>.yaml`)
+## 3. Data contract format (`contracts/<dataset>.<table>.yaml` in the config bucket)
+
+DataDesk publishes these from its onboarding contracts (one per BigQuery table with **File
+upload (Cloud Run)** turned on), and removes them when the table is paused there. Change the
+rules in DataDesk: an edit made in the bucket is overwritten on the next publish. The files in
+`config/contracts/` are starter contracts and test fixtures (`make upload-contracts` copies
+them to the bucket for a run without DataDesk).
 
 ```yaml
 name: customer
@@ -101,9 +107,11 @@ columns:
   - { name: is_active,   type: BOOL,   required: true }
 ```
 
+- Column rules DataDesk adds (all optional): `unique: true` (no value repeats in the file), `min` / `max` (numeric range, rule type `RANGE`), `min_length`, and `description` (a note for people sending files; not checked). They are contract checks like the others, so they roll into the `data_contract` row of `validation_metadata`.
 - The default severity for every rule is `ERROR`. A column can set `severity: WARNING`, which means failures are recorded but don't block the load.
 - Header matching checks the **column names and their order** against `columns`. If the header doesn't match, row-level checks are skipped.
-- Filename matching uses the object's base name, so folder prefixes in landing are ignored. A file matching more than one contract is rejected (`AMBIGUOUS_CONTRACT`).
+- A table folder in the object path (`datadesk/supplementary_data.customer/<id>/customer_20261015.csv`) picks the contract directly: only that table's YAML is read, so the number of contracts doesn't matter. A contract file must be for the table it is named after.
+- Without a table folder, the base name is matched against every contract's `file_pattern` (all contracts are read). A file matching more than one contract is rejected (`AMBIGUOUS_CONTRACT`).
 - `DATE`/`TIMESTAMP` columns accept ISO 8601, plus an optional `format` (strptime, e.g. `'%d/%m/%Y'`). Values are normalized to ISO in the loaded data. A timestamp without a timezone is treated as UTC.
 - `BOOL` accepts `true/false`, `t/f`, `yes/no`, `y/n` and `1/0`, case-insensitive.
 - Blank lines are ignored. A UTF-8 BOM (common in Excel exports) is accepted.
@@ -276,7 +284,7 @@ The JSON schema files in `Infra/bq/` will be rewritten to match these tables (Ph
 | | `invalid` bucket | Rejected and failed files |
 | | `archive` bucket | Successfully loaded files. Lifecycle moves them to Nearline after 30 days. |
 | | `staging` bucket | xlsx→csv conversions and enriched CSVs. Lifecycle deletes objects after 7 days. |
-| | **`config` bucket (added)** | Contract YAMLs, uploaded from `config/contracts/` via `fileset()` |
+| | **`config` bucket (added)** | Contract YAMLs, published by DataDesk. Terraform doesn't manage the objects (run `make contracts-handover` once if an older state still tracks them) |
 | Pub/Sub | topic `file-landing` | |
 | | `google_storage_notification` | landing → topic, `OBJECT_FINALIZE`, `JSON_API_V1` |
 | | push subscription `file-processor-push` | OIDC token (invoker SA), ack deadline 600 s, exponential backoff 10 s to 600 s, DLQ after 5 attempts |
@@ -366,7 +374,7 @@ file-processor-service/
 
 ## 7. Contracts and mock data
 
-`config/contracts/`: `customer.yaml`, `user.yaml`, `orders.yaml`
+`config/contracts/`: `customer.yaml`, `user.yaml`, `orders.yaml`: starter contracts and test fixtures. The live ones are published by DataDesk; onboarding a table in DataDesk starts from the contract the bucket already has for it.
 
 `mockdata/` (all files generated by `mockdata/generate.py`, i.e. `make mockdata`; `tests/test_mockdata.py` checks each outcome):
 

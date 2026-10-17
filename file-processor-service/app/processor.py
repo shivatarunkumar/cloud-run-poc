@@ -24,7 +24,7 @@ from app import converter, validator
 from app.audit import JobRecord, PriorAttempt
 from app.checks import gate_row, recon_row, validation_rows
 from app.config import Settings
-from app.contracts import ContractError, ContractMatch, ContractRegistry
+from app.contracts import ContractError, ContractMatch, ContractRegistry, table_of
 from app.loader import LoadResult, write_enriched_csv
 from app.logging_config import bind, step
 from app.models import CheckRow, CheckType, GcsObjectEvent, JobStatus, PushEnvelope
@@ -277,12 +277,17 @@ class FileProcessor:
                     )
                     raise Rejected("AMBIGUOUS_CONTRACT", str(resolve_error))
                 if match is None:
-                    message = f"No contract matches file name {event.basename!r}"
+                    table = table_of(event.name)
+                    message = (
+                        f"No contract for table {table} ({table}.yaml in the config bucket)"
+                        if table
+                        else f"No contract matches file name {event.basename!r}"
+                    )
                     self._gate_failed(
                         job,
                         "contract_match",
                         CheckType.CONTRACT_MATCH,
-                        "a contract file_pattern",
+                        f"contract {table}" if table else "a contract file_pattern",
                         event.basename,
                         message,
                     )

@@ -53,6 +53,8 @@ class _RuleCounter:
         self.evaluated = 0
         self.failed = 0
         self._max_samples = max_samples
+        # values seen so far, for UNIQUE
+        self.seen: set[str] = set()
 
     def check(self, ok: bool, row_number: int, value: Any) -> bool:
         self.evaluated += 1
@@ -95,9 +97,29 @@ def _column_rules(col: ColumnSpec, max_samples: int) -> dict[str, _RuleCounter]:
         rules["ALLOWED_VALUES"] = rule(
             "ALLOWED_VALUES", ",".join(col.allowed_values), {"allowed_values": col.allowed_values}
         )
+    if col.min_length is not None:
+        rules["MIN_LENGTH"] = rule("MIN_LENGTH", str(col.min_length), {"min_length": col.min_length})
     if col.max_length is not None:
         rules["MAX_LENGTH"] = rule("MAX_LENGTH", str(col.max_length), {"max_length": col.max_length})
+    if col.min is not None or col.max is not None:
+        rules["RANGE"] = rule("RANGE", _range_text(col), {"min": col.min, "max": col.max})
+    if col.unique:
+        rules["UNIQUE"] = rule("UNIQUE", "unique")
     return rules
+
+
+def _range_text(col: ColumnSpec) -> str:
+    if col.min is not None and col.max is not None:
+        return f"{col.min:g}..{col.max:g}"
+    return f">= {col.min:g}" if col.min is not None else f"<= {col.max:g}"
+
+
+def _in_range(col: ColumnSpec, value: str) -> bool:
+    try:
+        n = float(value)
+    except ValueError:
+        return False
+    return (col.min is None or n >= col.min) and (col.max is None or n <= col.max)
 
 
 def _check_value(col: ColumnSpec, rules: dict[str, _RuleCounter], raw: str, row_number: int) -> bool:
@@ -120,8 +142,16 @@ def _check_value(col: ColumnSpec, rules: dict[str, _RuleCounter], raw: str, row_
         ok &= rules["REGEX"].check(bool(col.compiled_regex.fullmatch(raw.strip())), row_number, raw)
     if "ALLOWED_VALUES" in rules:
         ok &= rules["ALLOWED_VALUES"].check(raw.strip() in col.allowed_values, row_number, raw)
+    if "MIN_LENGTH" in rules:
+        ok &= rules["MIN_LENGTH"].check(len(raw) >= col.min_length, row_number, raw)
     if "MAX_LENGTH" in rules:
         ok &= rules["MAX_LENGTH"].check(len(raw) <= col.max_length, row_number, raw)
+    if "RANGE" in rules:
+        ok &= rules["RANGE"].check(_in_range(col, raw.strip()), row_number, raw)
+    if "UNIQUE" in rules:
+        counter, value = rules["UNIQUE"], raw.strip()
+        ok &= counter.check(value not in counter.seen, row_number, raw)
+        counter.seen.add(value)
     return ok
 
 

@@ -14,11 +14,29 @@ landing bucket ──► Pub/Sub (file-landing) ──► Cloud Run (file-proces
 |---|---|
 | `Infra/terraform/` | All GCP resources (Terraform) |
 | `Infra/bq/` | BigQuery table schemas (JSON), used by Terraform |
-| `config/contracts/` | Data contracts (YAML). Terraform uploads them to the config bucket |
+| `config/contracts/` | Starter data contracts and test fixtures. The live contracts are published to the config bucket by DataDesk (see [config/contracts/README.md](config/contracts/README.md)) |
 | `file-processor-service/` | Cloud Run service (Python / FastAPI) |
 | `mockdata/` | Sample files for end-to-end testing |
 | `scripts/check_resources.sh` | Read-only check that all resources exist |
 | `Makefile` | Entry point for everything below |
+
+## Working with DataDesk
+
+DataDesk's **File upload** tab is the front door to this pipeline. People send a CSV or Excel
+file there; an admin approves it; DataDesk copies it into the landing bucket as
+`datadesk/<dataset>.<table>/<request id>/<prefix>_YYYYMMDD.<csv|xlsx>` (the table folder
+tells Cloud Run to read only that table's contract), and shows each step from
+`job_metadata` and `validation_metadata`. DataDesk also owns the contracts: it publishes one
+YAML per table to `gs://<project>-<env>-config/contracts/`.
+
+**Once, when switching to DataDesk-owned contracts:**
+
+1. `make contracts-handover`. Terraform stops tracking the contract objects, so `make setup`
+   won't delete them. They stay in the bucket, and Cloud Run keeps using them.
+2. In DataDesk, onboard each table (Onboarding → BigQuery → `supplementary_data` → table).
+   Its rules are filled in from the contract the bucket already has. Turn on **File upload
+   (Cloud Run)**, check them and save. DataDesk publishes
+   `contracts/supplementary_data.<table>.yaml` and removes the old `<table>.yaml`.
 
 ## Make targets
 
@@ -33,6 +51,8 @@ landing bucket ──► Pub/Sub (file-landing) ──► Cloud Run (file-proces
 | `make cloud-run-deploy` | Builds the service from source and deploys it to Cloud Run |
 | `make check` | Code checks: `terraform fmt`/`validate`, `ruff` lint and format |
 | `make test` | Runs `pytest` for the service |
+| `make contracts-handover` | Once: stops Terraform tracking the contract objects (they stay in the bucket; DataDesk owns them) |
+| `make upload-contracts` | Copies the starter contracts in `config/contracts/` to the config bucket, for a run without DataDesk |
 | `make bq-cleanup` | **Truncates every table** in `supplementary_data` and `file_audit` (keeps schemas). Lists the tables and asks you to type the project ID first. `DRY_RUN=1` only lists them |
 | `make destroy` | `terraform destroy`: **deletes everything** (asks for `yes` first) |
 
@@ -95,7 +115,7 @@ Expect about 40 resources to be created:
 | Area | Resources |
 |---|---|
 | APIs | run, pubsub, storage, bigquery, iam, cloudbuild, artifactregistry |
-| GCS | `<project>-<env>-landing`, `-invalid`, `-archive` (moves to Nearline after 30 days), `-staging` (deletes after 7 days), `-config` with contracts under `contracts/` |
+| GCS | `<project>-<env>-landing`, `-invalid`, `-archive` (moves to Nearline after 30 days), `-staging` (deletes after 7 days), `-config` (DataDesk publishes contracts under `contracts/`) |
 | Pub/Sub | topic `file-landing` + bucket notification on landing; push subscription `file-processor-push` (OIDC, 600s ack, backoff 10–600s, DLQ after 5 attempts); topic `file-landing-dlq` + `file-landing-dlq-sub` |
 | BigQuery (europe-west2) | `supplementary_data.customer`, `.user`, `.orders`; `file_audit.job_metadata`, `.validation_metadata` |
 | IAM | `file-processor-sa` (runtime), `pubsub-invoker-sa` (push auth), plus bindings for the GCS and Pub/Sub service agents |
@@ -191,7 +211,7 @@ Uploading the same file again processes it again. `customer` and `orders` are ap
 | Change | Command |
 |---|---|
 | Service code | `make cloud-run-deploy` |
-| Contract YAML in `config/contracts/` | `make setup` (re-uploads changed contracts; the service picks them up within 5 minutes) |
+| A table's contract | Change it in DataDesk (Onboarding). DataDesk republishes it; the service picks it up within 5 minutes |
 | Infra / table schemas | `make plan`, then `make setup` |
 
 ### 11. Tear down
@@ -207,6 +227,7 @@ This deletes all buckets (including their files), datasets and tables. The `clou
 ## Status
 
 - [x] Infrastructure (Terraform, Makefile, this README)
-- [x] Data contracts (`config/contracts/`: customer, user, orders)
+- [x] Data contracts: published by DataDesk; starters in `config/contracts/` (customer, user, orders)
+- [x] DataDesk File upload tab: files arrive in landing through DataDesk, and DataDesk reads `file_audit` back
 - [x] Cloud Run service (`file-processor-service/`, see its [README](file-processor-service/README.md))
 - [x] Mock data and end-to-end test steps

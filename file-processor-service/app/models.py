@@ -82,9 +82,17 @@ class ColumnSpec(BaseModel):
 
     name: str
     type: ColumnType = "STRING"
+    # a note for people sending files (DataDesk shows it); not checked
+    description: str | None = None
     required: bool = False
+    # no value may repeat within the file
+    unique: bool = False
     regex: str | None = None
     allowed_values: list[str] | None = None
+    # numeric range, for INT64 / NUMERIC / FLOAT64 columns
+    min: float | None = None
+    max: float | None = None
+    min_length: int | None = None
     max_length: int | None = None
     # strptime format for DATE/TIMESTAMP when the file doesn't use ISO 8601.
     format: str | None = None
@@ -94,6 +102,14 @@ class ColumnSpec(BaseModel):
     @classmethod
     def _stringify_allowed(cls, v: Any) -> Any:
         return [str(x) for x in v] if isinstance(v, list) else v
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> "ColumnSpec":
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError(f"{self.name}: min is greater than max")
+        if self.min_length is not None and self.max_length is not None and self.min_length > self.max_length:
+            raise ValueError(f"{self.name}: min_length is greater than max_length")
+        return self
 
     @cached_property
     def compiled_regex(self) -> re.Pattern[str] | None:

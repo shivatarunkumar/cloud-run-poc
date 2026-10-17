@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from app.audit import AuditRepository
 from app.config import get_settings
-from app.contracts import ContractRegistry, gcs_source
+from app.contracts import ContractRegistry, gcs_contract, gcs_source
 from app.loader import BigQueryLoader
 from app.logging_config import configure_logging, log_context, trace_field
 from app.models import PushEnvelope
@@ -36,7 +36,9 @@ def get_processor() -> FileProcessor:
         settings=s,
         storage=GcsStorage(gcs),
         contracts=ContractRegistry(
-            gcs_source(gcs, s.config_bucket, s.contracts_prefix), s.contract_cache_ttl_seconds
+            gcs_source(gcs, s.config_bucket, s.contracts_prefix),
+            s.contract_cache_ttl_seconds,
+            fetch_one=gcs_contract(gcs, s.config_bucket, s.contracts_prefix),
         ),
         audit=AuditRepository(bq, s.gcp_project, s.audit_dataset, s.job_table, s.validation_table),
         loader=BigQueryLoader(bq, s.gcp_project, s.load_timeout_seconds),

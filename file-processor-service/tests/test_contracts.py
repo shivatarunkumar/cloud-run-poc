@@ -80,3 +80,70 @@ def test_unique_key_must_be_a_column():
             {"name": "x", "version": 1, "file_pattern": "x", "target_table": "d.t",
              "unique_key": ["nope"], "columns": [{"name": "id"}]}
         )  # fmt: skip
+
+
+# --- by table folder: only that table's contract is read ---------------------------------------
+from app.contracts import directory_contract, table_of  # noqa: E402
+
+CUSTOMER = """
+name: customer
+version: 3
+file_pattern: '^customer_(\\d{8})\\.(csv|xlsx)$'
+file_date_group: 1
+target_table: supplementary_data.customer
+columns: [{name: id, type: INT64}]
+"""
+
+
+@pytest.mark.parametrize(
+    "name, table",
+    [
+        ("datadesk/supplementary_data.customer/9f1c/customer_20261015.csv", "supplementary_data.customer"),
+        ("supplementary_data.customer/x.csv", "supplementary_data.customer"),
+        ("customer_20261015.csv", None),
+        ("datadesk/9f1c/customer_20261015.csv", None),
+        ("datadesk/a.b.c/x.csv", None),
+    ],
+)
+def test_table_of(name, table):
+    assert table_of(name) == table
+
+
+def test_a_table_folder_reads_only_that_contract(tmp_path):
+    (tmp_path / "supplementary_data.customer.yaml").write_text(CUSTOMER)
+    scans = []
+    fetched = []
+
+    def source():
+        scans.append(1)
+        return {}
+
+    def fetch(key):
+        fetched.append(key)
+        return directory_contract(tmp_path)(key)
+
+    registry = ContractRegistry(source, fetch_one=fetch)
+    match = registry.resolve("datadesk/supplementary_data.customer/9f1c/customer_20261015.csv")
+    assert match.contract.version == "3" and match.file_date == date(2026, 10, 15)
+    # cached: a second file for the same table doesn't read it again; nothing scans every contract
+    registry.resolve("datadesk/supplementary_data.customer/a2b3/customer_20261016.csv")
+    assert fetched == ["supplementary_data.customer"] and scans == []
+
+
+def test_a_table_folder_without_a_contract_is_no_match(tmp_path):
+    registry = ContractRegistry(lambda: {}, fetch_one=directory_contract(tmp_path))
+    assert registry.resolve("datadesk/supplementary_data.unknown/1/x_20261015.csv") is None
+
+
+def test_a_name_that_does_not_follow_the_pattern_still_finds_its_table(tmp_path):
+    (tmp_path / "supplementary_data.customer.yaml").write_text(CUSTOMER)
+    registry = ContractRegistry(lambda: {}, fetch_one=directory_contract(tmp_path))
+    match = registry.resolve("datadesk/supplementary_data.customer/1/export.csv")
+    assert match.contract.name == "customer" and match.file_date is None
+
+
+def test_a_contract_in_the_wrong_file_is_refused(tmp_path):
+    (tmp_path / "supplementary_data.orders.yaml").write_text(CUSTOMER)
+    registry = ContractRegistry(lambda: {}, fetch_one=directory_contract(tmp_path))
+    with pytest.raises(ContractError, match="is for supplementary_data.customer"):
+        registry.resolve("supplementary_data.orders/1/orders_20261015.csv")
