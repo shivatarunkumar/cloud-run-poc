@@ -32,7 +32,7 @@ flowchart LR
 | Region | **europe-west2** for every resource, BigQuery datasets included | All of your existing resources are in this region. |
 | Bad data | **All-or-nothing** | Any ERROR rule failure rejects the whole file. Partial loads never happen. WARNING rules are only recorded. |
 | Networking | **No VPC/subnet** | Cloud Run reaches GCS, BigQuery and Pub/Sub through Google APIs. Security comes from internal ingress plus authenticated push. If a private resource is ever needed, add Direct VPC egress then. |
-| Contracts | YAML in a GCS **config** bucket, **published by DataDesk** | Mappings and rules can change without redeploying. DataDesk's onboarding contract is the source: it writes `contracts/<dataset>.<table>.yaml` whenever the contract changes (see §3). Terraform only creates the bucket. The service caches contracts with a TTL. |
+| Contracts | YAML in a GCS **config** bucket, **published by DataDesk** | Mappings and rules can change without redeploying. DataDesk's onboarding contract is the source: it writes `contracts/<dataset>.<table>.yaml` whenever the contract changes (see §3). Terraform only creates the bucket. The service caches each table's contract; a change in the bucket notifies topic `contract-changes`, whose push calls `POST /contracts` to read it again (see §2). |
 | File size | Small (< ~100 MB) | Rows are validated by streaming through Python, then loaded with a **BQ load job** from GCS. Streaming inserts are not used. |
 | Deployment | `gcloud run deploy --source` from local. **No Terraform-managed registry.** | Terraform creates the Cloud Run service with a placeholder image and ignores later image changes. Code deploys come from local. Cloud Build builds the image and gcloud creates the `cloud-run-source-deploy` Artifact Registry repo itself. |
 | Audit writes | `job_metadata` uses DML INSERT/UPDATE. `validation_metadata` uses `insert_rows_json` | Rows in the streaming buffer can't be UPDATEd. Validation rows are insert-only, so streaming is fine for them. |
@@ -46,7 +46,7 @@ flowchart LR
 | # | Step | Outcome |
 |---|---|---|
 | 1 | Parse the envelope. Ignore events other than `OBJECT_FINALIZE` and folder placeholders (`name` ending with `/`). | 204, ack |
-| 2 | **Resolve the contract.** A file under a table folder (`…/<dataset>.<table>/…`, which is how DataDesk lands files) reads only `contracts/<dataset>.<table>.yaml`, on demand, cached per table. A file without one is matched by name against every contract's `file_pattern`. The pattern's date group gives `file_date`. | No contract → move the file to `invalid/_unmapped/...`, job `REJECTED`, ack |
+| 2 | **Resolve the contract.** A file under a table folder (`…/<dataset>.<table>/…`, which is how DataDesk lands files) reads only `contracts/<dataset>.<table>.yaml`, on demand, cached per table. The cache is refreshed by `POST /contracts` when the YAML changes, a file tagged with another `contract_version` (DataDesk tags every file) reads it again at once, and every entry expires after `CONTRACT_CACHE_TTL_SECONDS`. A file without one is matched by name against every contract's `file_pattern`. The pattern's date group gives `file_date`. | No contract → move the file to `invalid/_unmapped/...`, job `REJECTED`, ack |
 | 3 | **Idempotency check.** Key = `bucket/name#generation` (guards against Pub/Sub redelivering the same message). If a job with this key already has status `SUCCESS` or `IN_PROGRESS`, skip and ack. Otherwise `attempt_number` = prior attempts + 1. A new upload of the same file gets a new generation and is processed normally. `load_mode: append` adds the rows again; `overwrite` replaces the table. | `DUPLICATE_SKIPPED`, ack |
 | 4 | **Register the job** in `job_metadata` (DML INSERT, status `IN_PROGRESS`). | |
 | 5 | **Convert `.xlsx`** to CSV in the staging bucket (first sheet, using openpyxl). | |
@@ -89,7 +89,8 @@ description: Customer master data
 file_pattern: '^customer_(\d{8})\.(csv|xlsx)$'   # filename → contract
 file_date_group: 1                               # regex group holding YYYYMMDD
 target_table: supplementary_data.customer
-load_mode: append                                # append | overwrite (see §2 step 3)
+load_mode: append                                # the default: append | overwrite (see §2 step 3)
+load_modes: [append, overwrite]                  # optional: modes a file may ask for (object metadata load_mode)
 file_format: [csv, xlsx]
 delimiter: ','
 has_header: true
@@ -108,6 +109,7 @@ columns:
 ```
 
 - Column rules DataDesk adds (all optional): `unique: true` (no value repeats in the file), `min` / `max` (numeric range, rule type `RANGE`), `min_length`, and `description` (a note for people sending files; not checked). They are contract checks like the others, so they roll into the `data_contract` row of `validation_metadata`.
+- **Load mode per file:** a landed object may carry custom metadata `load_mode=append|overwrite` (DataDesk sets it from the sender's choice). Cloud Run uses it when the contract's `load_modes` allows it, rejects the file (`LOAD_MODE_NOT_ALLOWED`) when it doesn't, and uses `load_mode` when the object carries none.
 - The default severity for every rule is `ERROR`. A column can set `severity: WARNING`, which means failures are recorded but don't block the load.
 - Header matching checks the **column names and their order** against `columns`. If the header doesn't match, row-level checks are skipped.
 - A table folder in the object path (`datadesk/supplementary_data.customer/<id>/customer_20261015.csv`) picks the contract directly: only that table's YAML is read, so the number of contracts doesn't matter. A contract file must be for the table it is named after.
@@ -348,7 +350,7 @@ file-processor-service/
     main.py            # FastAPI app: POST /pubsub, GET /healthz
     config.py          # Settings from env vars (pydantic-settings)
     models.py          # Pub/Sub envelope, GCS object event, Contract, RuleResult, statuses
-    contracts.py       # Load contracts from config bucket, TTL cache, filename match
+    contracts.py       # Contracts per table (cached, refreshed by POST /contracts), filename match
     coercion.py        # Type parsing/normalization (INT64, NUMERIC, DATE, ...)
     converter.py       # xlsx → csv
     validator.py       # file-level + row-level rules → ValidationReport
@@ -363,6 +365,8 @@ file-processor-service/
   requirements.txt  requirements-dev.txt  pyproject.toml (ruff + pytest config)
   README.md
 ```
+
+**Routes:** `POST /pubsub` (a file landed: push subscription `file-processor-push`), `POST /contracts` (a contract YAML changed in the config bucket: push subscription `contract-refresh-push` on topic `contract-changes`; reads that contract again and returns 204), `GET /healthz`. One Cloud Run service, one route per push subscription. A push reaches one instance; the others catch up through the per-file version check or the TTL.
 
 **Environment variables:** `GCP_PROJECT`, `GCP_REGION`, `LANDING_BUCKET`, `INVALID_BUCKET`, `ARCHIVE_BUCKET`, `STAGING_BUCKET`, `CONFIG_BUCKET`, `CONTRACTS_PREFIX` (default `contracts/`), `AUDIT_DATASET` (default `file_audit`), `CONTRACT_CACHE_TTL_SECONDS` (default `300`), `RUNTIME_SERVICE_ACCOUNT` (written to `created_by`), `SERVICE_VERSION`, `LOG_LEVEL` (default `INFO`).
 

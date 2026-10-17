@@ -183,3 +183,23 @@ def test_disallowed_format(processor, storage, audit):
     outcome = processor.handle(make_envelope("customer_20261015.csv"))
     assert outcome.status == "REJECTED"
     assert audit.job["error_code"] == "UNSUPPORTED_FORMAT"
+
+
+# --- a file may ask for append or overwrite, within its contract -----------------------------
+def test_a_file_asks_for_overwrite_when_the_contract_allows_it(processor, storage, audit, loader):
+    for c in processor.contracts.contracts():
+        if c.name == "customer":
+            object.__setattr__(c, "load_modes", ["append", "overwrite"])
+    land(storage, "customer_20261015.csv", GOOD_CUSTOMERS)
+    outcome = processor.handle(make_envelope("customer_20261015.csv", metadata={"load_mode": "overwrite"}))
+    assert outcome.status == "SUCCESS"
+    assert audit.job["load_mode"] == "overwrite"
+    assert loader.loads[0][2] == "WRITE_TRUNCATE"
+
+
+def test_a_mode_the_contract_does_not_allow_is_rejected(processor, storage, audit, loader):
+    land(storage, "customer_20261015.csv", GOOD_CUSTOMERS)  # customer: append only
+    outcome = processor.handle(make_envelope("customer_20261015.csv", metadata={"load_mode": "overwrite"}))
+    assert outcome.status == "REJECTED"
+    assert audit.job["error_code"] == "LOAD_MODE_NOT_ALLOWED"
+    assert loader.loads == []

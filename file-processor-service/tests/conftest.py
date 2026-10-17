@@ -177,7 +177,11 @@ def processor(settings, storage, registry, audit, loader, clock, tmp_path) -> Fi
 
 
 def make_envelope(
-    name: str, bucket: str = LANDING, generation: str = "1001", event_type: str = "OBJECT_FINALIZE"
+    name: str,
+    bucket: str = LANDING,
+    generation: str = "1001",
+    event_type: str = "OBJECT_FINALIZE",
+    metadata: dict[str, str] | None = None,
 ) -> PushEnvelope:
     obj = {
         "bucket": bucket,
@@ -186,6 +190,7 @@ def make_envelope(
         "size": "123",
         "contentType": "text/csv",
         "timeCreated": "2026-10-15T08:59:00.000Z",
+        **({"metadata": metadata} if metadata else {}),
     }
     return PushEnvelope.model_validate(
         {

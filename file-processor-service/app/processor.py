@@ -27,7 +27,7 @@ from app.config import Settings
 from app.contracts import ContractError, ContractMatch, ContractRegistry, table_of
 from app.loader import LoadResult, write_enriched_csv
 from app.logging_config import bind, step
-from app.models import CheckRow, CheckType, GcsObjectEvent, JobStatus, PushEnvelope
+from app.models import CheckRow, CheckType, GcsObjectEvent, JobStatus, PushEnvelope, disposition
 
 log = logging.getLogger(__name__)
 
@@ -172,7 +172,8 @@ class FileProcessor:
 
         resolve_error: ContractError | None = None
         try:
-            match = self.contracts.resolve(event.name)
+            # the contract version the file was checked against (DataDesk tags it), if any
+            match = self.contracts.resolve(event.name, event.metadata.get("contract_version"))
         except ContractError as exc:
             match, resolve_error = None, exc
         if match:
@@ -307,6 +308,18 @@ class FileProcessor:
                     )
                     raise Rejected("UNSUPPORTED_FORMAT", message)
 
+                # the file may ask for append or overwrite (object metadata), within the contract
+                requested = event.metadata.get("load_mode")
+                try:
+                    mode = contract.mode_for(requested)
+                except ValueError as exc:
+                    allowed = ",".join(contract.load_modes or [contract.load_mode])
+                    self._gate_failed(
+                        job, "load_mode", CheckType.FILE_FORMAT, allowed, str(requested), str(exc)
+                    )
+                    raise Rejected("LOAD_MODE_NOT_ALLOWED", str(exc)) from exc
+                job.set(load_mode=mode)
+
                 local = Path(tmp) / event.basename
                 with step(log, "download", uri=event.uri) as s:
                     self.storage.download(event.bucket, event.name, local, event.generation)
@@ -370,10 +383,8 @@ class FileProcessor:
                     s["staged"] = staged_uri
                 job.set(staged_file_path=staged_uri)
 
-                with step(
-                    log, "bq_load", table=job.target_table, write_disposition=contract.write_disposition
-                ) as s:
-                    result = self.loader.load(staged_uri, contract.target_table, contract.write_disposition)
+                with step(log, "bq_load", table=job.target_table, write_disposition=disposition(mode)) as s:
+                    result = self.loader.load(staged_uri, contract.target_table, disposition(mode))
                     loaded = True
                     s.update(bq_job_id=result.job_id, output_rows=result.output_rows)
                 job.set(bq_load_job_id=result.job_id, rows_loaded=result.output_rows)

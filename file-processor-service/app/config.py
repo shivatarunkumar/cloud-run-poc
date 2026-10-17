@@ -16,12 +16,13 @@ class Settings(BaseSettings):
     staging_bucket: str
     config_bucket: str
     contracts_prefix: str = "contracts/"
+    # how long a cached contract lives when nothing refreshes it (POST /contracts does)
+    contract_cache_ttl_seconds: int = 300
 
     audit_dataset: str = "file_audit"
     job_table: str = "job_metadata"
     validation_table: str = "validation_metadata"
 
-    contract_cache_ttl_seconds: int = 300
     max_sample_failures: int = 10
     # An IN_PROGRESS job older than this is treated as crashed and may be retried.
     in_progress_timeout_seconds: int = 660

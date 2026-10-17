@@ -41,6 +41,8 @@ class GcsObjectEvent(BaseModel):
     size: int | None = None
     content_type: str | None = None
     time_created: datetime | None = None
+    # the object's custom metadata, e.g. {"load_mode": "overwrite"} set by DataDesk
+    metadata: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
     def from_envelope(cls, envelope: PushEnvelope) -> "GcsObjectEvent":
@@ -56,6 +58,7 @@ class GcsObjectEvent(BaseModel):
             size=obj.get("size"),
             content_type=obj.get("contentType"),
             time_created=obj.get("timeCreated"),
+            metadata=obj.get("metadata") or {},
         )
 
     @property
@@ -72,6 +75,12 @@ class GcsObjectEvent(BaseModel):
 
 
 # --- Data contracts ----------------------------------------------------------
+
+
+def disposition(load_mode: str) -> str:
+    """BigQuery write disposition for a load mode: overwrite replaces the table."""
+    return "WRITE_TRUNCATE" if load_mode == "overwrite" else "WRITE_APPEND"
+
 
 ColumnType = Literal["STRING", "INT64", "NUMERIC", "FLOAT64", "BOOL", "DATE", "TIMESTAMP"]
 Severity = Literal["ERROR", "WARNING"]
@@ -126,7 +135,10 @@ class Contract(BaseModel):
     file_date_group: int | None = None
     file_date_format: str = "%Y%m%d"
     target_table: str  # dataset.table
+    # the default load mode, and (optionally) every mode a file may ask for in its object
+    # metadata (load_mode=append|overwrite); without load_modes only load_mode is allowed
     load_mode: Literal["append", "overwrite"] = "append"
+    load_modes: list[Literal["append", "overwrite"]] | None = None
     file_format: list[Literal["csv", "xlsx"]] = ["csv"]
     delimiter: str = ","
     has_header: bool = True
@@ -153,6 +165,8 @@ class Contract(BaseModel):
         names = [c.name for c in self.columns]
         if len(names) != len(set(names)):
             raise ValueError("duplicate column names")
+        if self.load_modes is not None and self.load_mode not in self.load_modes:
+            raise ValueError(f"load_mode {self.load_mode!r} is not one of load_modes {self.load_modes}")
         missing = set(self.unique_key) - set(names)
         if missing:
             raise ValueError(f"unique_key columns not in columns: {sorted(missing)}")
@@ -169,7 +183,17 @@ class Contract(BaseModel):
 
     @property
     def write_disposition(self) -> str:
-        return "WRITE_TRUNCATE" if self.load_mode == "overwrite" else "WRITE_APPEND"
+        return disposition(self.load_mode)
+
+    def mode_for(self, requested: str | None) -> str:
+        """The load mode for one file: the one it asks for (object metadata), if the contract
+        allows it, else the contract's default. Raises ValueError for a mode not allowed."""
+        if not requested:
+            return self.load_mode
+        allowed = self.load_modes or [self.load_mode]
+        if requested not in allowed:
+            raise ValueError(f"load mode {requested!r} isn't allowed (allowed: {', '.join(allowed)})")
+        return requested
 
     @property
     def job_name(self) -> str:

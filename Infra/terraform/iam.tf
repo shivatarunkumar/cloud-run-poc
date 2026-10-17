@@ -91,3 +91,12 @@ resource "google_cloud_run_v2_service_iam_member" "pubsub_invoker" {
   role     = "roles/run.invoker"
   member   = google_service_account.pubsub_invoker.member
 }
+
+# The GCS service agent publishes contract changes from the config bucket.
+resource "google_pubsub_topic_iam_member" "gcs_contract_publisher" {
+  topic  = google_pubsub_topic.contract_changes.id
+  role   = "roles/pubsub.publisher"
+  member = local.gcs_service_agent
+
+  depends_on = [google_project_service.apis]
+}

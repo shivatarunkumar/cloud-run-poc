@@ -29,6 +29,11 @@ tells Cloud Run to read only that table's contract), and shows each step from
 `job_metadata` and `validation_metadata`. DataDesk also owns the contracts: it publishes one
 YAML per table to `gs://<project>-<env>-config/contracts/`.
 
+**Contract changes reach Cloud Run straight away.** The config bucket notifies topic
+`contract-changes`; its push subscription calls the service's `POST /contracts`, which reads
+that table's contract again. DataDesk also tags every file with the contract version it was
+checked against, so any instance with an older copy reads the new one before using it.
+
 **Once, when switching to DataDesk-owned contracts:**
 
 1. `make contracts-handover`. Terraform stops tracking the contract objects, so `make setup`

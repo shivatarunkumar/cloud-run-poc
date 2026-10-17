@@ -1,6 +1,7 @@
 from datetime import date
 
 import pytest
+import yaml
 
 from app.contracts import ContractError, ContractRegistry, parse_contracts
 from app.models import Contract
@@ -83,7 +84,7 @@ def test_unique_key_must_be_a_column():
 
 
 # --- by table folder: only that table's contract is read ---------------------------------------
-from app.contracts import directory_contract, table_of  # noqa: E402
+from app.contracts import directory_contract, key_of, table_of  # noqa: E402
 
 CUSTOMER = """
 name: customer
@@ -147,3 +148,58 @@ def test_a_contract_in_the_wrong_file_is_refused(tmp_path):
     registry = ContractRegistry(lambda: {}, fetch_one=directory_contract(tmp_path))
     with pytest.raises(ContractError, match="is for supplementary_data.customer"):
         registry.resolve("supplementary_data.orders/1/orders_20261015.csv")
+
+
+def test_load_modes_must_include_the_default():
+    base = yaml.safe_load(CUSTOMER)
+    assert (
+        Contract.model_validate({**base, "load_modes": ["append", "overwrite"]}).mode_for("overwrite")
+        == "overwrite"
+    )
+    assert Contract.model_validate(base).mode_for(None) == "append"
+    with pytest.raises(ValueError, match="isn't allowed"):
+        Contract.model_validate(base).mode_for("overwrite")
+    with pytest.raises(ValueError, match="not one of load_modes"):
+        Contract.model_validate({**base, "load_mode": "append", "load_modes": ["overwrite"]})
+
+
+def test_a_file_checked_against_a_newer_version_reads_the_contract_again(tmp_path):
+    path = tmp_path / "supplementary_data.customer.yaml"
+    path.write_text(CUSTOMER)  # version 3
+    registry = ContractRegistry(lambda: {}, fetch_one=directory_contract(tmp_path))
+    name = "datadesk/supplementary_data.customer/1/customer_20261015.csv"
+    assert registry.resolve(name).contract.version == "3"
+
+    path.write_text(CUSTOMER.replace("version: 3", "version: 4"))  # DataDesk publishes v4
+    assert registry.resolve(name).contract.version == "3"  # cached, and nothing says it changed
+    assert registry.resolve(name, version="4").contract.version == "4"  # the file says v4: read now
+
+
+def test_refresh_reads_a_changed_contract_and_forgets_a_removed_one(tmp_path):
+    path = tmp_path / "supplementary_data.customer.yaml"
+    path.write_text(CUSTOMER)
+    registry = ContractRegistry(lambda: {}, fetch_one=directory_contract(tmp_path))
+    name = "datadesk/supplementary_data.customer/1/customer_20261015.csv"
+    assert registry.resolve(name).contract.version == "3"
+
+    path.write_text(CUSTOMER.replace("version: 3", "version: 4"))
+    assert registry.refresh("supplementary_data.customer").version == "4"  # POST /contracts
+    assert registry.resolve(name).contract.version == "4"  # every later file, no tag needed
+
+    path.unlink()
+    assert registry.refresh("supplementary_data.customer") is None
+    assert registry.resolve(name) is None
+
+
+@pytest.mark.parametrize(
+    "name, key",
+    [
+        ("contracts/supplementary_data.customer.yaml", "supplementary_data.customer"),
+        ("contracts/ds.t.yml", "ds.t"),
+        ("contracts/customer.yaml", None),  # an old name-matched contract: no table key
+        ("other/ds.t.yaml", None),
+        ("contracts/ds.t.txt", None),
+    ],
+)
+def test_key_of(name, key):
+    assert key_of(name) == key

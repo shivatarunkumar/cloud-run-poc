@@ -41,11 +41,15 @@ check "contracts uploaded to gs://${PREFIX}-config/contracts/" \
 check "landing bucket notification -> file-landing" \
   bash -c "gcloud storage buckets notifications list 'gs://${PREFIX}-landing' --project '$PROJECT_ID' | grep -q 'topics/file-landing$'"
 
+check "config bucket notification -> contract-changes" \
+  bash -c "gcloud storage buckets notifications list 'gs://${PREFIX}-config' --project '$PROJECT_ID' | grep -q 'topics/contract-changes$'"
 echo "Pub/Sub"
 check "topic file-landing"              gcloud pubsub topics describe file-landing --project "$PROJECT_ID"
 check "topic file-landing-dlq"          gcloud pubsub topics describe file-landing-dlq --project "$PROJECT_ID"
 check "subscription file-processor-push" gcloud pubsub subscriptions describe file-processor-push --project "$PROJECT_ID"
 check "subscription file-landing-dlq-sub" gcloud pubsub subscriptions describe file-landing-dlq-sub --project "$PROJECT_ID"
+check "topic contract-changes"          gcloud pubsub topics describe contract-changes --project "$PROJECT_ID"
+check "subscription contract-refresh-push" gcloud pubsub subscriptions describe contract-refresh-push --project "$PROJECT_ID"
 
 echo "BigQuery"
 for t in supplementary_data.customer supplementary_data.user supplementary_data.orders \

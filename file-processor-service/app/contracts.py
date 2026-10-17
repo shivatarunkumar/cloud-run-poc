@@ -1,7 +1,8 @@
 """Find the data contract (YAML) for a landed file.
 
 A file under a table folder, e.g. landing/datadesk/supplementary_data.customer/<id>/customer_20261015.csv,
-names its table: only contracts/supplementary_data.customer.yaml is read, on demand, and cached on its own.
+names its table: only contracts/supplementary_data.customer.yaml is read, on demand, and cached per table.
+A contract change refreshes the cache through POST /contracts (config bucket → Pub/Sub).
 That is how DataDesk lands files, so the number of contracts in the bucket doesn't matter.
 
 A file with no table folder (dropped into landing by hand) falls back to matching its name against
@@ -99,8 +100,20 @@ def parse_contracts(sources: dict[str, str]) -> list[Contract]:
     return contracts
 
 
+def key_of(object_name: str, prefix: str = "contracts/") -> str | None:
+    """The table key of a contract object: "contracts/ds.tbl.yaml" → "ds.tbl"; None otherwise."""
+    if not object_name.startswith(prefix):
+        return None
+    stem = object_name[len(prefix) :].removesuffix(".yaml").removesuffix(".yml")
+    return stem if TABLE_FOLDER.fullmatch(stem) and object_name.endswith((".yaml", ".yml")) else None
+
+
 class ContractRegistry:
-    """Caches contracts for `ttl_seconds` so edits in the config bucket are picked up without a redeploy."""
+    """Contracts read from the bucket on demand and cached per table.
+
+    The cache stays right three ways: POST /contracts refreshes a table when its contract changes
+    (config bucket → Pub/Sub → this instance), a file tagged with another contract version reads
+    it again at once (DataDesk tags every file), and every entry expires after `ttl_seconds`."""
 
     def __init__(
         self,
@@ -111,55 +124,79 @@ class ContractRegistry:
     ) -> None:
         self._source = source
         self._fetch_one = fetch_one
-        # table key -> (loaded at, contract or None); each contract has its own TTL
-        self._by_table: dict[str, tuple[float, Contract | None]] = {}
         self._ttl = ttl_seconds
         self._clock = clock
         self._lock = threading.Lock()
-        self._contracts: list[Contract] = []
-        self._loaded_at: float | None = None
+        # table key -> (read at, contract or None)
+        self._by_table: dict[str, tuple[float, Contract | None]] = {}
+        # every contract, for files matched by name (no table folder)
+        self._all: list[Contract] = []
+        self._all_at: float | None = None
 
     def contracts(self) -> list[Contract]:
+        """Every contract: only for a file without a table folder."""
         with self._lock:
             now = self._clock()
-            if self._loaded_at is None or now - self._loaded_at >= self._ttl:
-                self._contracts = parse_contracts(self._source())
-                self._loaded_at = now
+            if self._all_at is None or now - self._all_at >= self._ttl:
+                self._all = parse_contracts(self._source())
+                self._all_at = now
                 log.info(
-                    "Loaded %d contracts: %s",
-                    len(self._contracts),
-                    ", ".join(f"{c.name} v{c.version} ({c.file_pattern})" for c in self._contracts),
+                    "Read %d contracts to match files by name: %s",
+                    len(self._all),
+                    ", ".join(f"{c.name} v{c.version}" for c in self._all),
                 )
-            return self._contracts
+            return self._all
 
-    def for_table(self, key: str) -> Contract | None:
-        """The contract for one table (contracts/<dataset>.<table>.yaml), read on demand and cached."""
+    def _read(self, key: str) -> Contract | None:
+        text = self._fetch_one(key) if self._fetch_one else None
+        parsed = parse_contracts({f"{key}.yaml": text}) if text is not None else []
+        contract = parsed[0] if parsed else None
+        if contract is not None and contract.target_table != key:
+            raise ContractError(f"Contract {key}.yaml is for {contract.target_table}, not {key}")
+        return contract
+
+    def for_table(self, key: str, version: str | None = None) -> Contract | None:
+        """The contract for one table (contracts/<dataset>.<table>.yaml), from the cache when it
+        is fresh and, if the file names a version, that version; otherwise read now."""
         if self._fetch_one is None:
             return None
         with self._lock:
             now = self._clock()
             cached = self._by_table.get(key)
-            if cached is not None and now - cached[0] < self._ttl:
+            fresh = cached is not None and now - cached[0] < self._ttl
+            right_version = cached is not None and (
+                version is None or (cached[1] is not None and cached[1].version == str(version))
+            )
+            if fresh and right_version:
                 return cached[1]
-            text = self._fetch_one(key)
-            parsed = parse_contracts({f"{key}.yaml": text}) if text is not None else []
-            contract = parsed[0] if parsed else None
-            if contract is not None and contract.target_table != key:
-                raise ContractError(f"Contract {key}.yaml is for {contract.target_table}, not {key}")
+            contract = self._read(key)
             self._by_table[key] = (now, contract)
-            if contract is not None:
-                log.info("Loaded contract %s v%s for %s", contract.name, contract.version, key)
-            else:
-                log.warning("No contract for %s (%s.yaml)", key, key)
-            return contract
+        if contract is None:
+            log.warning("No contract for %s (%s.yaml)", key, key)
+        else:
+            log.info("Read contract %s v%s for %s", contract.name, contract.version, key)
+            if version is not None and str(version) != contract.version:
+                log.warning(
+                    "%s: file checked against v%s, the bucket has v%s", key, version, contract.version
+                )
+        return contract
 
-    def resolve(self, file_name: str) -> ContractMatch | None:
-        """The contract for a landed file: by its table folder when it has one (reading only that
-        contract), else by matching its base name against every contract's file_pattern."""
+    def refresh(self, key: str) -> Contract | None:
+        """Read one table's contract now (its YAML changed or was removed), and drop the
+        name-matching list so it is read again too."""
+        with self._lock:
+            contract = self._read(key) if self._fetch_one else None
+            self._by_table[key] = (self._clock(), contract)
+            self._all_at = None
+        return contract
+
+    def resolve(self, file_name: str, version: str | None = None) -> ContractMatch | None:
+        """The contract for a landed file: by its table folder when it has one (that contract
+        only), else by matching its base name against every contract's file_pattern."""
         basename = file_name.rsplit("/", 1)[-1]
         key = table_of(file_name)
         if key is not None and self._fetch_one is not None:
-            contract = self.for_table(key)
+            contract = self.for_table(key, version)
             if contract is None:
                 return None
             return ContractMatch(contract, contract.compiled_pattern.fullmatch(basename))

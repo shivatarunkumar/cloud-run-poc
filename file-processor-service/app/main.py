@@ -7,17 +7,17 @@ import logging
 from functools import lru_cache
 from typing import Annotated, Any
 
-from fastapi import Body, Depends, FastAPI, Request
+from fastapi import Body, Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from google.cloud import bigquery, storage
 from pydantic import ValidationError
 
 from app.audit import AuditRepository
 from app.config import get_settings
-from app.contracts import ContractRegistry, gcs_contract, gcs_source
+from app.contracts import ContractRegistry, gcs_contract, gcs_source, key_of
 from app.loader import BigQueryLoader
 from app.logging_config import configure_logging, log_context, trace_field
-from app.models import PushEnvelope
+from app.models import GcsObjectEvent, PushEnvelope
 from app.processor import FileProcessor, is_transient
 from app.storage import GcsStorage
 
@@ -72,6 +72,35 @@ def pubsub_push(
             extra={"http_status": response.status_code},
         )
         return JSONResponse(status_code=response.status_code, content=response.content)
+
+
+@app.post("/contracts")
+def contract_changed(
+    body: Annotated[dict[str, Any], Body()],
+    processor: Annotated[FileProcessor, Depends(get_processor)],
+) -> Response:
+    """A contract YAML changed in the config bucket (config bucket → Pub/Sub topic
+    contract-changes → this push): read it again in this instance's cache. Other instances keep
+    theirs until a file names a newer version, or the entry expires."""
+    try:
+        event = GcsObjectEvent.from_envelope(PushEnvelope.model_validate(body))
+    except (ValidationError, ValueError) as exc:
+        log.error("Malformed contract-change message: %s", exc, extra={"envelope": body})
+        return JSONResponse(status_code=400, content={"status": "BAD_REQUEST", "detail": str(exc)[:500]})
+    key = key_of(event.name, processor.s.contracts_prefix)
+    if key is None or event.event_type not in ("OBJECT_FINALIZE", "OBJECT_DELETE"):
+        log.info("Contract-change message ignored: %s %s", event.event_type, event.name)
+        return Response(status_code=204)
+    try:
+        contract = processor.contracts.refresh(key)
+    except Exception as exc:  # e.g. GCS unavailable: 500 makes Pub/Sub retry
+        log.exception("Contract refresh failed for %s", key)
+        return JSONResponse(status_code=500, content={"status": "ERROR", "detail": str(exc)[:500]})
+    if contract is None:
+        log.info("Contract removed: %s", key)
+    else:
+        log.info("Contract refreshed: %s v%s", key, contract.version)
+    return Response(status_code=204)
 
 
 class _Response:
