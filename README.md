@@ -167,6 +167,7 @@ This runs `gcloud run deploy --source file-processor-service` with the runtime s
 | `customer_20261016.csv` | `REJECTED` (bad email, null id, duplicate id, bad country/date/boolean), file in invalid |
 | `user_20261016.csv` | `REJECTED`, `role` column missing (HEADER_MATCH) |
 | `unknown_20261015.csv` | `REJECTED`, no contract, file in `invalid/_unmapped/` |
+| `customer_id_200.csv` | `REJECTED` when dropped in by hand (name isn't `customer_YYYYMMDD`); loads 3 rows when sent through DataDesk, which renames it |
 
 Upload one file to start with, then the rest:
 

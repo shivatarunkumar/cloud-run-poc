@@ -15,6 +15,9 @@ EXPECTED = {
     "customer_20261016.csv": ("REJECTED", None, {"REGEX", "NOT_NULL", "UNIQUE", "ALLOWED_VALUES", "TYPE"}),
     "user_20261016.csv": ("REJECTED", None, {"HEADER_MATCH"}),
     "unknown_20261015.csv": ("REJECTED", None, {"CONTRACT_MATCH"}),
+    # valid rows, but the name isn't customer_YYYYMMDD: dropped by hand it matches no contract
+    # (sent through DataDesk it lands renamed, under its table folder, and loads)
+    "customer_id_200.csv": ("REJECTED", None, {"CONTRACT_MATCH"}),
 }
 
 

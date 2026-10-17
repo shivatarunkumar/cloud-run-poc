@@ -391,6 +391,7 @@ file-processor-service/
 | `customer_20261016.csv` | bad email, null id, duplicate key, bad country, bad date, bad boolean | REJECTED, invalid bucket |
 | `user_20261016.csv` | missing `role` column | REJECTED (HEADER_MATCH) |
 | `unknown_20261015.csv` | no matching contract | REJECTED, `invalid/_unmapped/` |
+| `customer_id_200.csv` | 3 valid customer rows, name not `customer_YYYYMMDD` | REJECTED when dropped by hand; via DataDesk it lands renamed under its table folder and loads |
 | `orders_20261016.xlsx` | 10 rows; tests the Excel conversion path | SUCCESS |
 
 ---
